@@ -9,7 +9,7 @@
                Miltzu 2026
 
 /*
- * AutoAlignmentPro.js  -  v1.3.1
+ * AutoAlignmentPro.js  -  v1.4.0
  *
  * Automatic star alignment + plate solving for PixInsight (V8 runtime,
  * PixInsight 1.9.4 Lockhart or later).
@@ -23,13 +23,18 @@
  *   mode for blurry images with very large stars.
  * - Dark theme, English / Finnish user interface.
  *
+ * 1.4.0  Smarter image selection for open images: size / type columns,
+ *        already aligned, minimized and tiny images left unchecked,
+ *        choices kept on refresh, name filter, invert, smart select;
+ *        best reference searched among the checked images; "by Miltzu".
+ *
  * Author: Miltzu
  */
 
 CoreApplication.ensureMinimumVersion( 1, 9, 4 );
 
 #define AAP_TITLE    "Auto Alignment Pro"
-#define AAP_VERSION  "1.3.1"
+#define AAP_VERSION  "1.4.0"
 #define AAP_SETTINGS "AutoAlignmentPro/"
 
 // ----------------------------------------------------------------------------
@@ -58,6 +63,24 @@ const AAP_STRINGS = {
       browse: "Browse...",
       colTarget: "Image to align",
       colStatus: "Status",
+      colSize: "Size",
+      colType: "Type",
+      typeMono: "Mono",
+      typeColor: "RGB",
+      nAligned: "already aligned",
+      nIconic: "minimized",
+      nSmall: "small image",
+      nOtherSize: "different size",
+      filter: "Filter:",
+      filterTip: "<p>Part of the image name, e.g. <i>Ha</i>, <i>OIII</i> or <i>light</i>. Several with commas: "
+               + "<i>Ha, OIII</i>.</p><p>Press Enter or <b>Select matching</b> to check only the matching images.</p>",
+      selectMatching: "Select matching",
+      invert: "Invert",
+      smart: "Smart select",
+      smartTip: "<p>Checks the images that look like they should be aligned and leaves out "
+              + "already aligned results (name ends with the postfix or <i>_registered</i>), "
+              + "minimized windows and small images such as masks or thumbnails.</p>",
+      lSmart: "Selected %1 of %2 images.",
       addFiles: "Add files...",
       clear: "Clear",
       refresh: "Refresh list",
@@ -183,6 +206,24 @@ const AAP_STRINGS = {
       browse: "Selaa...",
       colTarget: "Kohdistettava kuva",
       colStatus: "Tila",
+      colSize: "Koko",
+      colType: "Tyyppi",
+      typeMono: "Mono",
+      typeColor: "RGB",
+      nAligned: "jo kohdistettu",
+      nIconic: "pienennetty",
+      nSmall: "pieni kuva",
+      nOtherSize: "eri koko",
+      filter: "Suodatin:",
+      filterTip: "<p>Osa kuvan nimestä, esim. <i>Ha</i>, <i>OIII</i> tai <i>light</i>. Useampi pilkulla: "
+               + "<i>Ha, OIII</i>.</p><p>Enter tai <b>Valitse osuvat</b> valitsee vain nimeen osuvat kuvat.</p>",
+      selectMatching: "Valitse osuvat",
+      invert: "Käännä",
+      smart: "Älykäs valinta",
+      smartTip: "<p>Valitsee kuvat, jotka näyttävät kohdistettavilta, ja jättää pois jo kohdistetut "
+              + "tulokset (nimen lopussa pääte tai <i>_registered</i>), pienennetyt ikkunat ja pienet "
+              + "kuvat kuten maskit ja esikatselut.</p>",
+      lSmart: "Valittu %1 / %2 kuvaa.",
       addFiles: "Lisää tiedostoja...",
       clear: "Tyhjennä",
       refresh: "Päivitä lista",
@@ -412,6 +453,7 @@ const AAP_SOLVE_ATTEMPTS = [
 ];
 
 // Colors (0xAARRGGBB) of the status column.
+const AAP_COL_STATUS    = 3;          // status column of the image list
 const AAP_COLOR_OK      = 0xff5fd38a;
 const AAP_COLOR_FAILED  = 0xffff6b6b;
 const AAP_COLOR_WORKING = 0xffffc857;
@@ -1332,6 +1374,24 @@ const AAP_STYLE =
    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }" +
    "QToolTip { background-color: #0d0f13; color: #d7dae0; border: 1px solid #6fb1ff; }";
 
+// "by Miltzu" as rich text: handwritten font, every letter on a cyan - violet - pink gradient
+// (the same signature as in AutoFlat Pro).
+const AAP_SIG_STOPS = [ 0x55c2ff, 0x9b8cff, 0xff7ac6 ];
+function aapSignature( sizePt )
+{
+   let mix = ( c0, c1, t ) => [ 16, 8, 0 ].map( sh => Math.round( ((c0 >> sh) & 255) + (((c1 >> sh) & 255) - ((c0 >> sh) & 255))*t ) );
+   let hex = rgb => "#" + rgb.map( v => ( v < 16 ? "0" : "" ) + v.toString( 16 ) ).join( "" );
+   let txt = "by Miltzu", out = "";
+   for ( let i = 0; i < txt.length; ++i )
+   {
+      let t = i/( txt.length - 1 ), n = AAP_SIG_STOPS.length - 1, k = Math.min( n - 1, Math.floor( t*n ) );
+      let ch = txt.charAt( i );
+      out += ( ch == " " ) ? "&nbsp;" : "<span style='color:" + hex( mix( AAP_SIG_STOPS[k], AAP_SIG_STOPS[k + 1], t*n - k ) ) + "'>" + ch + "</span>";
+   }
+   return "<span style=\"font-family:'Segoe Script','Lucida Handwriting','Brush Script MT','URW Chancery L','Z003',cursive; "
+        + "font-size:" + sizePt + "pt; font-style:italic; font-weight:bold;\">" + out + "</span>";
+}
+
 const AAP_HEADER_STYLE =
    "background-color: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1b3a66, stop:0.55 #16233a, stop:1 #13151a);"
    + " border: 1px solid #2d5f9e; border-radius: 8px;";
@@ -1439,13 +1499,29 @@ class AAPDialog extends Dialog
       this.headerTextSizer.add( this.titleLabel );
       this.headerTextSizer.add( this.subtitleLabel );
 
+      this.signatureLabel = new Label( this.headerFrame );
+      this.signatureLabel.useRichText = true;
+      this.signatureLabel.styleSheet = AAP_PLAIN_STYLE;
+      this.signatureLabel.text = aapSignature( 14 );
+      this.signatureLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
+
+      this.headerLangSizer = new HorizontalSizer;
+      this.headerLangSizer.spacing = 8;
+      this.headerLangSizer.addStretch();
+      this.headerLangSizer.add( this.languageLabel );
+      this.headerLangSizer.add( this.languageCombo );
+
+      this.headerRightSizer = new VerticalSizer;
+      this.headerRightSizer.spacing = 4;
+      this.headerRightSizer.add( this.signatureLabel );
+      this.headerRightSizer.add( this.headerLangSizer );
+
       this.headerFrame.sizer = new HorizontalSizer;
       this.headerFrame.sizer.margin = 12;
       this.headerFrame.sizer.spacing = 8;
       this.headerFrame.sizer.add( this.headerTextSizer );
       this.headerFrame.sizer.addStretch();
-      this.headerFrame.sizer.add( this.languageLabel );
-      this.headerFrame.sizer.add( this.languageCombo );
+      this.headerFrame.sizer.add( this.headerRightSizer );
 
       // --- Mode -------------------------------------------------------------
 
@@ -1536,9 +1612,11 @@ class AAPDialog extends Dialog
       // --- Targets ----------------------------------------------------------
 
       this.targetTree = new TreeBox( this );
-      this.targetTree.numberOfColumns = 2;
+      this.targetTree.numberOfColumns = 4;
       this.targetTree.setHeaderText( 0, aapTr( "colTarget" ) );
-      this.targetTree.setHeaderText( 1, aapTr( "colStatus" ) );
+      this.targetTree.setHeaderText( 1, aapTr( "colSize" ) );
+      this.targetTree.setHeaderText( 2, aapTr( "colType" ) );
+      this.targetTree.setHeaderText( AAP_COL_STATUS, aapTr( "colStatus" ) );
       this.targetTree.headerVisible = true;
       this.targetTree.rootDecoration = false;
       this.targetTree.alternateRowColor = true;
@@ -1589,6 +1667,39 @@ class AAPDialog extends Dialog
       this.selectNoneButton.text = aapTr( "selectNone" );
       this.selectNoneButton.onClick = () => this.setAllChecked( false );
 
+      this.invertButton = new PushButton( this );
+      this.invertButton.text = aapTr( "invert" );
+      this.invertButton.onClick = () =>
+      {
+         for ( let i = 0; i < this.targetTree.numberOfChildren; ++i )
+            this.targetTree.child( i ).checked = !this.targetTree.child( i ).checked;
+      };
+
+      this.smartButton = new PushButton( this );
+      this.smartButton.text = aapTr( "smart" );
+      this.smartButton.toolTip = aapTr( "smartTip" );
+      this.smartButton.onClick = () => this.fillViewTargets( true/*smart*/ );
+
+      this.filterLabel = new Label( this );
+      this.filterLabel.text = aapTr( "filter" );
+      this.filterLabel.textAlignment = TextAlignment.Right | TextAlignment.VertCenter;
+
+      this.filterEdit = new Edit( this );
+      this.filterEdit.toolTip = aapTr( "filterTip" );
+      this.filterEdit.onEditCompleted = () => this.selectMatching();
+
+      this.matchButton = new PushButton( this );
+      this.matchButton.text = aapTr( "selectMatching" );
+      this.matchButton.toolTip = aapTr( "filterTip" );
+      this.matchButton.onClick = () => this.selectMatching();
+
+      this.filterSizer = new HorizontalSizer;
+      this.filterSizer.spacing = 6;
+      this.filterSizer.add( this.filterLabel );
+      this.filterSizer.add( this.filterEdit, 100 );
+      this.filterSizer.add( this.matchButton );
+      this.filterSizer.add( this.smartButton );
+
       this.targetButtonsSizer = new HorizontalSizer;
       this.targetButtonsSizer.spacing = 6;
       this.targetButtonsSizer.add( this.addFilesButton );
@@ -1596,6 +1707,7 @@ class AAPDialog extends Dialog
       this.targetButtonsSizer.add( this.refreshViewsButton );
       this.targetButtonsSizer.addStretch();
       this.targetButtonsSizer.add( this.selectAllButton );
+      this.targetButtonsSizer.add( this.invertButton );
       this.targetButtonsSizer.add( this.selectNoneButton );
 
       this.inputGroup = new GroupBox( this );
@@ -1607,6 +1719,7 @@ class AAPDialog extends Dialog
       this.inputGroup.sizer.add( this.refViewSizer );
       this.inputGroup.sizer.add( this.refFileSizer );
       this.inputGroup.sizer.add( this.targetTree, 100 );
+      this.inputGroup.sizer.add( this.filterSizer );
       this.inputGroup.sizer.add( this.targetButtonsSizer );
 
       // --- Alignment settings -----------------------------------------------
@@ -1967,6 +2080,7 @@ class AAPDialog extends Dialog
       this.refViewList.visible = !fileMode;
       this.autoRefButton.visible = !fileMode;
       this.refreshViewsButton.visible = !fileMode;
+      this.smartButton.visible = !fileMode;
 
       this.refFileLabel.visible = fileMode;
       this.refFileEdit.visible = fileMode;
@@ -2003,18 +2117,22 @@ class AAPDialog extends Dialog
       this.targetKeys = [];
    }
 
-   addTargetNode( key, text, statusText, toolTip )
+   addTargetNode( key, text, statusText, toolTip, sizeText, typeText, checked )
    {
       let node = new TreeBoxNode( this.targetTree );
       node.setText( 0, text );
-      node.setText( 1, statusText );
+      node.setText( 1, sizeText || "" );
+      node.setText( 2, typeText || "" );
+      node.setText( AAP_COL_STATUS, statusText );
       if ( toolTip )
          node.setToolTip( 0, toolTip );
       node.checkable = true;
-      node.checked = true;
+      node.checked = ( checked === undefined ) ? true : checked;
       try
       {
          node.setTextColor( 1, AAP_COLOR_INFO );
+         node.setTextColor( 2, AAP_COLOR_INFO );
+         node.setTextColor( AAP_COL_STATUS, AAP_COLOR_INFO );
       }
       catch ( e )
       {
@@ -2022,29 +2140,92 @@ class AAPDialog extends Dialog
       this.targetKeys.push( key );
    }
 
-   fillViewTargets()
+   // Should this open image be aligned? Returns { check, note }.
+   // Left out: results of an earlier alignment, minimized windows and small
+   // images (masks, thumbnails, previews made into images).
+   classifyView( window, reference )
+   {
+      let view = window.mainView, img = view.image, id = view.id;
+      let postfix = ( this.parameters.postfix || "" ).trim();
+      let low = id.toLowerCase();
+      if ( low.indexOf( "_registered" ) >= 0 || ( postfix.length > 0 && low.endsWith( postfix.toLowerCase() ) ) )
+         return { check: false, note: aapTr( "nAligned" ) };
+      if ( window.iconic )
+         return { check: false, note: aapTr( "nIconic" ) };
+      if ( Math.min( img.width, img.height ) < 256 )
+         return { check: false, note: aapTr( "nSmall" ) };
+      if ( reference != null && ( img.width != reference.image.width || img.height != reference.image.height ) )
+         return { check: true, note: aapTr( "nOtherSize" ) };
+      return { check: true, note: "" };
+   }
+
+   // Lists the open images. The user's own check marks are kept when the list
+   // is refreshed; smart = true applies the automatic choice to every image.
+   fillViewTargets( smart )
    {
       if ( this.parameters.fileMode )
          return;
 
+      // remember the current check marks (by view id)
+      if ( !this.userChecks )
+         this.userChecks = {};
+      let n = Math.min( this.targetTree.numberOfChildren, this.targetKeys.length );
+      for ( let i = 0; i < n; ++i )
+         this.userChecks[this.targetKeys[i]] = this.targetTree.child( i ).checked;
+      if ( smart )
+         this.userChecks = {};
+
       let reference = this.referenceView();
       this.clearTargets();
+      let total = 0, checkedCount = 0;
       for ( let window of ImageWindow.windows )
       {
          let view = window.mainView;
          if ( reference != null && view.id == reference.id )
             continue;
-         this.addTargetNode( view.id, view.id, aapHasSolution( window ) ? aapTr( "stSolved" ) : "", "" );
+         let c = this.classifyView( window, reference );
+         let checked = ( this.userChecks[view.id] !== undefined ) ? this.userChecks[view.id] : c.check;
+         let img = view.image;
+         let status = c.note;
+         if ( aapHasSolution( window ) )
+            status = aapTr( "stSolved" ) + ( status ? ",  " + status : "" );
+         this.addTargetNode( view.id, view.id, status, "", img.width + " x " + img.height,
+                             img.isColor ? aapTr( "typeColor" ) : aapTr( "typeMono" ), checked );
+         ++total;
+         if ( checked )
+            ++checkedCount;
       }
-      this.targetTree.adjustColumnWidthToContents( 0 );
+      for ( let col = 0; col < 3; ++col )
+         this.targetTree.adjustColumnWidthToContents( col );
       this.updateCounter();
+      if ( smart )
+         this.log( aapTr( "lSmart", checkedCount, total ) );
+   }
+
+   // Checks only the images whose name contains one of the filter words.
+   selectMatching()
+   {
+      let words = this.filterEdit.text.split( "," ).map( w => w.trim().toLowerCase() ).filter( w => w.length > 0 );
+      if ( words.length == 0 )
+         return;
+      let n = Math.min( this.targetTree.numberOfChildren, this.targetKeys.length ), hits = 0;
+      for ( let i = 0; i < n; ++i )
+      {
+         let name = this.targetTree.child( i ).text( 0 ).toLowerCase();
+         let match = words.some( w => name.indexOf( w ) >= 0 );
+         this.targetTree.child( i ).checked = match;
+         if ( match )
+            ++hits;
+      }
+      this.log( aapTr( "lSmart", hits, n ) );
    }
 
    addFileTarget( path )
    {
       if ( this.targetKeys.indexOf( path ) >= 0 )
          return;
-      this.addTargetNode( path, File.extractName( path ) + File.extractExtension( path ), "", path );
+      this.addTargetNode( path, File.extractName( path ) + File.extractExtension( path ), "", path,
+                          "", File.extractExtension( path ).replace( ".", "" ).toUpperCase() );
    }
 
    // Updates the status column of the target identified by key.
@@ -2074,10 +2255,10 @@ class AAPDialog extends Dialog
          text += "  -  " + detail;
 
       let node = this.targetTree.child( index );
-      node.setText( 1, text );
+      node.setText( AAP_COL_STATUS, text );
       try
       {
-         node.setTextColor( 1, color );
+         node.setTextColor( AAP_COL_STATUS, color );
       }
       catch ( e )
       {
@@ -2174,7 +2355,14 @@ class AAPDialog extends Dialog
 
    pickBestReference()
    {
-      let views = ImageWindow.windows.map( w => w.mainView );
+      // search among the checked images (and the current reference); if fewer
+      // than two, among every open image
+      let views = this.checkedViews();
+      let current = this.referenceView();
+      if ( current != null )
+         views.unshift( current );
+      if ( views.length < 2 )
+         views = ImageWindow.windows.map( w => w.mainView );
       if ( views.length < 2 )
       {
          this.warn( aapTr( "wTwoImages" ) );
